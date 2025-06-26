@@ -479,6 +479,7 @@ func main() {
 		ptrApiKey           *string
 		ptrCrn              *string
 		ptrInfraID          *string
+		ptrSIGUID           *string
 		ptrShouldDebug      *string
 		ptrShouldDelete     *string
 		crnStruct           crn.CRN
@@ -494,6 +495,7 @@ func main() {
 	ptrApiKey = flag.String("apiKey", "", "Your IBM Cloud API key")
 	ptrCrn = flag.String("crn", "", "The Service Instance CRN to use")
 	ptrInfraID = flag.String("infraID", "", "The infrastructure ID to use")
+	ptrSIGUID = flag.String("serviceInstanceGUID", "", "The Service Instance GUID to use")
 	ptrShouldDebug = flag.String("shouldDebug", "false", "Should output debug output")
 	ptrShouldDelete = flag.String("shouldDelete", "false", "Should delete resources")
 
@@ -544,8 +546,8 @@ func main() {
 		fmt.Println("Error: No API key set, use -apiKey")
 		os.Exit(1)
 	}
-	if *ptrCrn == "" && *ptrInfraID == "" {
-		fmt.Println("Error: No CRN or infrastructure ID set, use -crn or -infraID")
+	if *ptrCrn == "" && *ptrInfraID == "" && *ptrSIGUID == "" {
+		fmt.Println("Error: No CRN, infrastructure ID, or service instance ID set, use -crn or -infraID or -serviceInstanceGUID")
 		os.Exit(1)
 	}
 
@@ -560,7 +562,25 @@ func main() {
 
 		targetCrn, err = resourceSearch(*ptrApiKey, search, *ptrInfraID)
 		if err != nil {
-			fmt.Printf("Error: resourceSearch returns %s\n", err)
+			fmt.Printf("Error: resourceSearch(%s) returns %s\n", *ptrInfraID, err)
+			os.Exit(1)
+		}
+		log.Debugf("targetCrn = %s", targetCrn)
+
+		if targetCrn == "" {
+			fmt.Printf("Error: resourceSearch cannot find match for %s\n", *ptrInfraID)
+			os.Exit(1)
+		}
+	}
+
+	if *ptrSIGUID != "" {
+		search := fmt.Sprintf("family:resource_controller AND type:resource-instance AND crn:crn\\:v1\\:bluemix\\:public\\:power-iaas\\:*%s*",
+			*ptrSIGUID)
+		log.Debugf("search = %s", search)
+
+		targetCrn, err = resourceSearch(*ptrApiKey, search, *ptrSIGUID)
+		if err != nil {
+			fmt.Printf("Error: resourceSearch(%s) returns %s\n", *ptrSIGUID, err)
 			os.Exit(1)
 		}
 		log.Debugf("targetCrn = %s", targetCrn)
