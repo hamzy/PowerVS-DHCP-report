@@ -39,6 +39,8 @@ import (
 	"github.com/IBM-Cloud/bluemix-go/rest"
 	bxsession "github.com/IBM-Cloud/bluemix-go/session"
 
+	"github.com/IBM/platform-services-go-sdk/globalsearchv2"
+
 	"github.com/IBM-Cloud/power-go-client/clients/instance"
 	"github.com/IBM-Cloud/power-go-client/ibmpisession"
 	"github.com/IBM-Cloud/power-go-client/power/models"
@@ -48,6 +50,8 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"k8s.io/apimachinery/pkg/util/wait"
+
+	"k8s.io/utils/ptr"
 )
 
 var (
@@ -93,6 +97,89 @@ func mapZoneToRegion(zone string) string {
 	}
 
 	return foundRegion
+}
+
+func resourceSearch(apiKey string, query string, infraID string) (string, error) {
+	var (
+		ctx                 context.Context
+		cancel              context.CancelFunc
+		authenticator       core.Authenticator = &core.IamAuthenticator{
+			ApiKey: apiKey,
+		}
+		globalSearchOptions *globalsearchv2.GlobalSearchV2Options
+		searchService       *globalsearchv2.GlobalSearchV2
+		moreData                  = true
+		perPage             int64 = 100
+		searchCursor        string
+		searchOptions       *globalsearchv2.SearchOptions
+		scanResult          *globalsearchv2.ScanResult
+		response            *core.DetailedResponse
+		properties          map[string]interface{}
+		propertyName        string
+		ok                  bool
+		err                 error
+	)
+
+	fmt.Printf("Resource searching for %s\n", infraID)
+	log.Debugf("resourceSearch: query = %s", query)
+
+	ctx, cancel = context.WithTimeout(context.Background(), 15 * time.Minute)
+	defer cancel()
+
+	globalSearchOptions = &globalsearchv2.GlobalSearchV2Options{
+		URL:           globalsearchv2.DefaultServiceURL,
+		Authenticator: authenticator,
+	}
+
+	searchService, err = globalsearchv2.NewGlobalSearchV2(globalSearchOptions)
+	if err != nil {
+		return "", fmt.Errorf("resourceSearch: globalsearchv2.NewGlobalSearchV2: %w", err)
+	}
+
+	for moreData {
+		searchOptions = &globalsearchv2.SearchOptions{
+			Query: &query,
+			Limit: ptr.To(perPage),
+			// default Fields: []string{"account_id", "name", "type", "family", "crn"},
+			// all     Fields: []string{"*"},
+		}
+		if searchCursor != "" {
+			searchOptions.SetSearchCursor(searchCursor)
+		}
+		log.Debugf("resourceSearch: searchOptions = %+v", searchOptions)
+
+		scanResult, response, err = searchService.SearchWithContext(ctx, searchOptions)
+		if err != nil {
+			return "", fmt.Errorf("resourceSearch: searchService.SearchWithContext: err = %w, response = %v", err, response)
+		}
+		if scanResult.SearchCursor != nil {
+			log.Debugf("resourceSearch: scanResult = %+v, scanResult.SearchCursor = %+v, len scanResult.Items = %d", scanResult, *scanResult.SearchCursor, len(scanResult.Items))
+		} else {
+			log.Debugf("resourceSearch: scanResult = %+v, scanResult.SearchCursor = nil, len scanResult.Items = %d", scanResult, len(scanResult.Items))
+		}
+
+		for _, item := range scanResult.Items {
+			properties = item.GetProperties()
+
+			propertyName, ok = properties["name"].(string)
+			if !ok {
+				return "", fmt.Errorf("resourceSearch: name property not found")
+			}
+
+			fmt.Printf("FOUND %s\n", propertyName)
+
+			return *item.CRN, nil
+		}
+
+		moreData = int64(len(scanResult.Items)) == perPage
+		if moreData {
+			if scanResult.SearchCursor != nil {
+				searchCursor = *scanResult.SearchCursor
+			}
+		}
+	}
+
+	return "", err
 }
 
 func contextWithTimeout() (context.Context, context.CancelFunc) {
@@ -391,9 +478,11 @@ func main() {
 		ptrVersion          *bool
 		ptrApiKey           *string
 		ptrCrn              *string
+		ptrInfraID          *string
 		ptrShouldDebug      *string
 		ptrShouldDelete     *string
 		crnStruct           crn.CRN
+		targetCrn           string
 		region              string
 		piSession           *ibmpisession.IBMPISession
 		dhcpClient          *instance.IBMPIDhcpClient
@@ -404,6 +493,7 @@ func main() {
 	ptrVersion = flag.Bool("version", false, "print version information")
 	ptrApiKey = flag.String("apiKey", "", "Your IBM Cloud API key")
 	ptrCrn = flag.String("crn", "", "The Service Instance CRN to use")
+	ptrInfraID = flag.String("infraID", "", "The infrastructure ID to use")
 	ptrShouldDebug = flag.String("shouldDebug", "false", "Should output debug output")
 	ptrShouldDelete = flag.String("shouldDelete", "false", "Should delete resources")
 
@@ -447,21 +537,43 @@ func main() {
 		os.Exit(1)
 	}
 
+	log.Debugf("version = %v", version)
+	log.Debugf("release = %v", release)
+
 	if *ptrApiKey == "" {
 		fmt.Println("Error: No API key set, use -apiKey")
 		os.Exit(1)
 	}
-	if *ptrCrn == "" {
-		fmt.Println("Error: No CRN set, use -region")
+	if *ptrCrn == "" && *ptrInfraID == "" {
+		fmt.Println("Error: No CRN or infrastructure ID set, use -crn or -infraID")
 		os.Exit(1)
 	}
 
-	log.Debugf("version = %v", version)
-	log.Debugf("release = %v", release)
+	if *ptrCrn != "" {
+		targetCrn = *ptrCrn
+	}
 
-	crnStruct, err = crn.Parse(*ptrCrn)
+	if *ptrInfraID != "" {
+		search := fmt.Sprintf("family:resource_controller AND type:resource-instance AND crn:crn\\:v1\\:bluemix\\:public\\:power-iaas* AND name:*%s*",
+			*ptrInfraID)
+		log.Debugf("search = %s", search)
+
+		targetCrn, err = resourceSearch(*ptrApiKey, search, *ptrInfraID)
+		if err != nil {
+			fmt.Printf("Error: resourceSearch returns %s\n", err)
+			os.Exit(1)
+		}
+		log.Debugf("targetCrn = %s", targetCrn)
+
+		if targetCrn == "" {
+			fmt.Printf("Error: resourceSearch cannot find match for %s\n", *ptrInfraID)
+			os.Exit(1)
+		}
+	}
+
+	crnStruct, err = crn.Parse(targetCrn)
 	if err != nil {
-		fmt.Printf("Error: crn.Parse(%s) returns %s\n", *ptrCrn, err)
+		fmt.Printf("Error: crn.Parse(%s) returns %s\n", targetCrn, err)
 		os.Exit(1)
 	}
 	log.Debugf("crnStruct = %+v", crnStruct)
@@ -470,7 +582,7 @@ func main() {
 	region = mapZoneToRegion(crnStruct.Region)
 
 	if region == "" {
-		fmt.Printf("Error: Could not map zone %s\n", crnStruct.Region)
+		fmt.Printf("Error: Could not map zone \"%s\"\n", crnStruct.Region)
 		os.Exit(1)
 	}
 
