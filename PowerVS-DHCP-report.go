@@ -262,10 +262,13 @@ func findDhcpServers(dhcpClient *instance.IBMPIDhcpClient, instanceClient *insta
 		err              error
 	)
 
+	fmt.Printf("Finding DHCP servers...\n")
+
 	dhcpServers, err = dhcpClient.GetAll()
 	if err != nil {
 		return fmt.Errorf("Error: dhcpClient.GetAll returns %v", err)
 	}
+	log.Debugf("findDhcpServers: len(dhcpServers) = %d", len(dhcpServers))
 
 	for _, dhcpServer = range dhcpServers {
 		if dhcpServer.ID == nil {
@@ -290,7 +293,7 @@ func findDhcpServers(dhcpClient *instance.IBMPIDhcpClient, instanceClient *insta
 			field2 = *dhcpServer.Network.Name
 		}
 
-		fmt.Printf("findDhcpServers: FOUND %s %s\n", field1, field2)
+		fmt.Printf("FOUND %s %s\n", field1, field2)
 
 //		dhcpServerDetail, err = dhcpClient.Get(*dhcpServer.ID)
 //		if err != nil {
@@ -453,8 +456,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Debugf("version = %v\nrelease = %v", version, release)
-	log.Debugf("Begin")
+	log.Debugf("version = %v", version)
+	log.Debugf("release = %v", release)
 
 	crnStruct, err = crn.Parse(*ptrCrn)
 	if err != nil {
